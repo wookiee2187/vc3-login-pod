@@ -58,7 +58,7 @@ class HandleHeadNodes(VC3Task):
     global login_info
     def login_info(self, request):
 	'''
-	Outputs login pod info with node IP, port, deployment, service, configmap1, configmap2 
+	Outputs login pod info with node IP, port (for ssh), deployment, service, configmap1, configmap2 (for delete)
 	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
@@ -70,7 +70,7 @@ class HandleHeadNodes(VC3Task):
 	    dep = k8s_api.read_namespaced_deployment(name = "login-node-n-" + str(request.name), namespace = "default")
             service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = "default")
             port = service.spec.ports[0].node_port
-	    list_pods = v1.list_namespaced_pod("default") # To do - change to specific namespace
+	    list_pods = v1.list_namespaced_pod("default") 
 	    pod = list_pods.items[0]
 	    node = v1.read_node(pod.spec.node_name)
 	    IP = node.status.addresses[0].address
@@ -85,6 +85,9 @@ class HandleHeadNodes(VC3Task):
             return None
 
     def template(self):
+	'''
+	Templating for the config files
+	'''
 	config_data = yaml.load(open('/usr/lib/python2.7/site-packages/vc3master/plugins/task/vals.yaml'),Loader=yaml.FullLoader)
 	env = Environment(loader = FileSystemLoader('./templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('condor_config.local.j2')
@@ -104,6 +107,9 @@ class HandleHeadNodes(VC3Task):
 	return temp_up, temp_up2, temp_up3, temp_up4, temp_up5
 
     def login_create(self, request):
+	'''
+	Creates the deployment, service, and two config maps (one for adding users, the other for adding the config files)
+	'''
 	self.log.info('Starting login_create')
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
@@ -118,12 +124,12 @@ class HandleHeadNodes(VC3Task):
             check = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace ="default")
             self.log.info("pod already exists")
         except Exception:
-            # rendering template and creating configmap
+            # rendering template and creating configmap to mount config files
  	    temp_up, temp_up2, temp_up3, temp_up4, temp_up5 = self.template()
             name = 'temcon-' + str(request.name)
             namespace = 'default'
             body = kubernetes.client.V1ConfigMap()
-            body.data = {"condor_config.local":str(temp_up)}
+            body.data = {"condor_config.local":str(temp_up),"cvmfs_default_local":str(temp_up2),"minio":str(temp_up3),"core-site.xml":str(temp_up4),"spark":str(temp_up5)}
             body.metadata = kubernetes.client.V1ObjectMeta()
             body.metadata.name = name
             configuration = kubernetes.client.Configuration()
@@ -136,11 +142,12 @@ class HandleHeadNodes(VC3Task):
 	    self.create_dep(request)
 	    self.create_service(request)
 	    self.create_conf_users(request)
-            #utils.create_from_yaml(k8s_client, "deployNservice.yaml")
-            #utils.create_from_yaml(k8s_client, "/tmp/tconfig.yaml-editable.yaml")
 	return 1
 
     def create_dep(self, request):
+	'''
+	Creates deployment
+	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         pp = pprint.PrettyPrinter(indent =4)
         configuration = kubernetes.client.Configuration()
@@ -175,6 +182,9 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling AppsV1Api->create_namespaced_deployment: %s\n" % e)
 
     def create_service(self, request):
+	'''
+	Creates service
+	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         core_v1_api = kubernetes.client.CoreV1Api()
         serv_list = []
@@ -186,6 +196,9 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling AppsV1Api->create_namespaced_service: %s\n" % e)	 
 
     def create_conf_users(self, request):
+	'''
+	Creates config map for users
+	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         core_v1_api = kubernetes.client.CoreV1Api()
 	string_to_append = self.add_keys_to_pod(request)
@@ -196,6 +209,9 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling CoreV1Api->create_namespaced_config_map: %s\n" % e)
 
     def login_pending(self, request): 
+	'''
+	function to wait while pod pending
+	'''
 	config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
         k8s_client = client.ApiClient()
@@ -213,6 +229,9 @@ class HandleHeadNodes(VC3Task):
         return login_info(self, request)
     
     def add_keys_to_pod(self, request):
+	'''
+	returns string to append to config map that adds users
+	'''
         members    = self.get_members_names(request)
 	attributes = {}
 	i = 1000
@@ -225,10 +244,6 @@ class HandleHeadNodes(VC3Task):
 	    string_to_append = '    ' + str(user.name) +':x:' + str(i) + ':' + str(i) + ':'+ '/home/' + str(user.name) + '::' + '/bin/bash:' + str(user.sshpubstring) + '\n' + '\n'
             self.log.info(string_to_append)
 	    i = i + 1
-            subprocess.call(['cp', '/tmp/tconfig.yaml', '/tmp/tconfig.yaml-editable.yaml'])
-	    self.log.info("MOVED TO TMP")
-            with open("/tmp/tconfig.yaml-editable.yaml", "a") as myfile:
-    	        myfile.write(string_to_append)
 	return string_to_append
 
     def runtask(self):
