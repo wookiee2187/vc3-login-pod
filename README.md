@@ -3,7 +3,8 @@
 # VC3 container documentation 
 
 # Running the container
-To start up the VC3 container, run the bash script runnew.sh ($ ./runnew.sh). If the container was previously running, run the bash script delete.sh ($ ./delete.sh), and then run $docker stop vc3, and re-run the bash script runnew.sh. runnew.sh should start the VC3 container, and while validating the allocation, the terminal output should show an SSH key, presented like this - 
+To start up the VC3 container, run the bash script runnew.sh ($ ./runnew.sh). If the container was previously running, run the bash script delete.sh ($ ./delete.sh), and then run $docker stop vc3, and re-run the bash script runnew.sh. runnew.sh should start the VC3 container, and while validating the allocation, the terminal output should show an SSH key, presented like this -
+
 <<<<<<<<<<<<<< TOKEN BEGINS >>>>>>>>>>>>>>>
 
 [your_key]
