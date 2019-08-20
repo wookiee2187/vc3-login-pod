@@ -20,18 +20,6 @@ Creating allocation...
 
 Trying to get allocation public key..
 
-No output.. trying again in 5 seconds..
-
-No output.. trying again in 5 seconds..
-
-No output.. trying again in 5 seconds..
-
-No output.. trying again in 5 seconds..
-
-No output.. trying again in 5 seconds..
-
-No output.. trying again in 5 seconds..
-
 Output looks okay..
 
 You will need to paste the following token into the remote cluster in ~/.ssh/authorized_keys:
