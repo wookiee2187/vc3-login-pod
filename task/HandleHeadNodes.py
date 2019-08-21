@@ -57,13 +57,15 @@ class HandleHeadNodes(VC3Task):
 
     global login_info
     def login_info(self, request):
+    	'''
+	Returns IP and port for ssh login
+	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
         k8s_client = client.ApiClient()
         k8s_api = client.ExtensionsV1beta1Api(k8s_client)
         configuration = kubernetes.client.Configuration()
         api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
-        #self.create_namespace(request)
         try:
             service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = str(request.name))
             port = service.spec.ports[0].node_port
@@ -75,24 +77,6 @@ class HandleHeadNodes(VC3Task):
             self.log.info(IP)
             self.log.info(port)
             return [IP, port]
-        except Exception:
-            self.log.info("Login pod does not exist")
-            return None
-
-    def login_info_del(self, request):
-        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
-        v1 = client.CoreV1Api()
-        k8s_client = client.ApiClient()
-        k8s_api = client.ExtensionsV1beta1Api(k8s_client)
-        configuration = kubernetes.client.Configuration()
-        api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
-        #self.create_namespace(request)
-        try:
-            dep = k8s_api.read_namespaced_deployment(name = "login-node-n-" + str(request.name), namespace = str(request.name))
-            service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = str(request.name))
-            conf1 = api_instance.read_namespaced_config_map(name = "new-config-" + request.name, namespace = str(request.name))
-            conf2 = api_instance.read_namespaced_config_map(name = "temcon-" + request.name, namespace = str(request.name))
-            return [dep, service, conf1, conf2]
         except Exception:
             self.log.info("Login pod does not exist")
             return None
@@ -133,7 +117,6 @@ class HandleHeadNodes(VC3Task):
         self.create_namespace(request)
 	self.add_keys_to_pod(request)
         try:
-	    #self.log.info(v1.list_pod_for_all_namespaces)
             # checks if deployment, service, configmap already created - To do add checks for service + configmaps
             check = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace =str(request.name))
             self.log.info("pod already exists")
@@ -159,6 +142,9 @@ class HandleHeadNodes(VC3Task):
 	return 1
 	
     def create_namespace(self, request):
+	'''
+	Creates namespace with request name 
+	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         pp = pprint.PrettyPrinter(indent =4)
         configuration = kubernetes.client.Configuration()
@@ -222,7 +208,7 @@ class HandleHeadNodes(VC3Task):
 
     def create_conf_users(self, request):
 	'''
-	Creates config map for users
+	Creates config map for users, currently has some users for testing
 	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         core_v1_api = kubernetes.client.CoreV1Api()
