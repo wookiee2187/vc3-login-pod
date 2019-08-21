@@ -57,9 +57,6 @@ class HandleHeadNodes(VC3Task):
 
     global login_info
     def login_info(self, request):
-	'''
-	Outputs login pod info with node IP, port (for ssh), deployment, service, configmap1, configmap2 (for delete)
-	'''
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
         k8s_client = client.ApiClient()
@@ -67,21 +64,36 @@ class HandleHeadNodes(VC3Task):
         configuration = kubernetes.client.Configuration()
         api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
         #self.create_namespace(request)
-	try:
-	    dep = k8s_api.read_namespaced_deployment(name = "login-node-n-" + str(request.name), namespace = str(request.name))
+        try:
             service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = str(request.name))
             port = service.spec.ports[0].node_port
-	    list_pods = v1.list_namespaced_pod(str(request.name)) 
-	    pod = list_pods.items[0]
-	    node = v1.read_node(pod.spec.node_name)
-	    IP = node.status.addresses[0].address
-	    conf1 = api_instance.read_namespaced_config_map(name = "new-config-" + request.name, namespace = str(request.name))
+            list_pods = v1.list_namespaced_pod(str(request.name))
+            pod = list_pods.items[0]
+            node = v1.read_node(pod.spec.node_name)
+            IP = node.status.addresses[0].address
+            self.log.info('About to return')
+            self.log.info(IP)
+            self.log.info(port)
+            return [IP, port]
+        except Exception:
+            self.log.info("Login pod does not exist")
+            return None
+
+    def login_info_del(self, request):
+        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
+        v1 = client.CoreV1Api()
+        k8s_client = client.ApiClient()
+        k8s_api = client.ExtensionsV1beta1Api(k8s_client)
+        configuration = kubernetes.client.Configuration()
+        api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
+        #self.create_namespace(request)
+        try:
+            dep = k8s_api.read_namespaced_deployment(name = "login-node-n-" + str(request.name), namespace = str(request.name))
+            service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = str(request.name))
+            conf1 = api_instance.read_namespaced_config_map(name = "new-config-" + request.name, namespace = str(request.name))
             conf2 = api_instance.read_namespaced_config_map(name = "temcon-" + request.name, namespace = str(request.name))
-	    self.log.info('About to return')
-	    self.log.info(IP)
-	    self.log.info(port)
-            return [IP, port, dep, service, conf1, conf2]
-	except Exception:
+            return [dep, service, conf1, conf2]
+        except Exception:
             self.log.info("Login pod does not exist")
             return None
 
@@ -350,19 +362,13 @@ class HandleHeadNodes(VC3Task):
 
     def state_terminating(self, request, headnode):
         try:
-        	config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
-        	configuration = kubernetes.client.Configuration()
-        	api_instance = kubernetes.client.AppsV1Api(kubernetes.client.ApiClient(configuration))
-	        api_instance2 = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
-                login = self.login_info(request)
-                #self.log.debug(Teminating headnode %s for request %s, request.headnode, request.name)
-                api_instance.delete_namespaced_deployment(login[2].metadata.name, "default")
-                api_instance2.delete_namespaced_service(login[3].metadata.name, "default")
-                api_instance2.delete_namespaced_config_map(login[4].metadata.name, "default")
-                api_instance2.delete_namespaced_config_map(login[5].metadata.name, "default")
-                self.initializers.pop(request.name, None)
+            config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
+	    configuration = kubernetes.client.Configuration()
+	    api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
+    	    api_response = api_instance.delete_namespace(str(request.name))
+            self.initializers.pop(request.name, None)
         except Exception, e:
-            self.log.warning('Could not find headnode instance for request %s (%s)', request.name, e)
+            self.log.warning('Could not delete headnode instance for request %s (%s)', request.name, e)
         finally:
             return ('terminated', 'Headnode succesfully terminated')
 
