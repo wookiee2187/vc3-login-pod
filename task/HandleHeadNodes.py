@@ -250,7 +250,7 @@ class HandleHeadNodes(VC3Task):
             except Exception, e:
                 self.log.warning("Could not find user: %s", member)
                 raise e
-	    string_to_append = '    ' + str(user.name) +':x:' + str(i) + ':' + str(i) + ':'+ '/home/' + str(user.name) + '::' + '/bin/bash:' + str(user.sshpubstring) + '\n' + '\n'
+	    string_to_append = str(user.name) +':x:' + str(i) + ':' + str(i) + ':'+ '/home/' + str(user.name) + '::' + '/bin/bash:' + str(user.sshpubstring) + '\n' + '\n'
             self.log.info(string_to_append)
 	    i = i + 1
 	return string_to_append
