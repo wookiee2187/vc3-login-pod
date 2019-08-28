@@ -25,7 +25,6 @@ from jinja2 import Environment, FileSystemLoader
 class HandleHeadNodes(VC3Task):
     '''
     Plugin to manage the head nodes lifetime.
-     
     '''
 
     def __init__(self, parent, config, section):
@@ -57,9 +56,10 @@ class HandleHeadNodes(VC3Task):
 
     global login_info
     def login_info(self, request):
-    	'''
-	Returns IP and port for ssh login
-	'''
+    	"""Finds IP and port for ssh login
+	Args: request 
+	Returns: IP and port as integers 
+	"""
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
         k8s_client = client.ApiClient()
@@ -82,9 +82,10 @@ class HandleHeadNodes(VC3Task):
             return None
 
     def template(self):
-	'''
-	Templating for the config files
-	'''
+	"""Templating for the config files
+	Args: None
+	Returns: temp_up, temp_up2, temp_up3, temp_up4, temp_up5 as rendered files
+	"""
 	config_data = yaml.load(open('/usr/lib/python2.7/site-packages/vc3master/plugins/task/vals.yaml'),Loader=yaml.FullLoader)
 	env = Environment(loader = FileSystemLoader('./templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('condor_config.local.j2')
@@ -104,9 +105,10 @@ class HandleHeadNodes(VC3Task):
 	return temp_up, temp_up2, temp_up3, temp_up4, temp_up5
 
     def login_create(self, request):
-	'''
-	Creates the deployment, service, and two config maps (one for adding users, the other for adding the config files)
-	'''
+	""" Creates the deployment, service, and two config maps (one for adding users, the other for adding the config files)
+	Args: request
+	Returns: None  
+	"""
 	self.log.info('Starting login_create')
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         v1 = client.CoreV1Api()
@@ -139,12 +141,13 @@ class HandleHeadNodes(VC3Task):
 	    self.create_dep(request)
 	    self.create_service(request)
 	    self.create_conf_users(request)
-	return 1
+	return 
 	
     def create_namespace(self, request):
-	'''
-	Creates namespace with request name 
-	'''
+	"""Creates namespace with request name 
+	Args: request
+	Returns: None 
+	"""
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         pp = pprint.PrettyPrinter(indent =4)
         configuration = kubernetes.client.Configuration()
@@ -156,16 +159,17 @@ class HandleHeadNodes(VC3Task):
     	    print("Exception when calling CoreV1Api->create_namespace: %s\n" % e)
 
     def create_dep(self, request):
-	'''
-	Creates deployment
-	'''
+	"""Creates deployment with request name
+	Args: request 
+	Returns: None
+	"""
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         pp = pprint.PrettyPrinter(indent =4)
         configuration = kubernetes.client.Configuration()
         api_instance = kubernetes.client.AppsV1Api(kubernetes.client.ApiClient(configuration))
         core_v1_api = client.CoreV1Api()
         namespace = 'default'
-        body = kubernetes.client.V1Deployment() # V1Deployment | 
+        body = kubernetes.client.V1Deployment() 
         body.metadata = kubernetes.client.V1ObjectMeta()
         body.metadata.name = 'login-node-n-' + str(request.name)
         body.metadata.labels = {'app':'login-node-n-' + str(request.name)}
@@ -174,7 +178,6 @@ class HandleHeadNodes(VC3Task):
         conf2_list = []
         volume0 = kubernetes.client.V1Volume(name = 'config-vol', config_map = kubernetes.client.V1ConfigMapVolumeSource(name = 'new-config-' + str(request.name), items = [kubernetes.client.V1KeyToPath(key = "tconfig-file.conf", path = "tconfig-file.conf")]))
         volume1 = kubernetes.client.V1Volume(name = 'temcon-vol', config_map = kubernetes.client.V1ConfigMapVolumeSource(name = 'temcon-' + str(request.name), items = [kubernetes.client.V1KeyToPath(key = "condor_config.local", path = "condor_config.local")]))
-        print("volumes not")
         env_list = []
         env_list.append(kubernetes.client.V1EnvVar(name = 'PASSWDFILE', value = "root/tconfig-file.conf"))
         vol_m_list = []
@@ -193,9 +196,10 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling AppsV1Api->create_namespaced_deployment: %s\n" % e)
 
     def create_service(self, request):
-	'''
-	Creates service
-	'''
+	"""Creates service with request name
+	Args: request 
+	Returns: None
+	"""
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         core_v1_api = kubernetes.client.CoreV1Api()
         serv_list = []
@@ -207,9 +211,10 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling AppsV1Api->create_namespaced_service: %s\n" % e)	 
 
     def create_conf_users(self, request):
-	'''
-	Creates config map for users, currently has some users for testing
-	'''
+	"""Creates config map for users with request name
+	Args: request 
+	Returns: None
+	"""
         config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
         core_v1_api = kubernetes.client.CoreV1Api()
 	string_to_append = self.add_keys_to_pod(request)
@@ -220,15 +225,14 @@ class HandleHeadNodes(VC3Task):
             print("Exception when calling CoreV1Api->create_namespaced_config_map: %s\n" % e)
 
     def login_pending(self, request): 
-	'''
-	function to wait while pod pending
-	'''
+	"""Waits until pod finishes building 
+	Args: request 
+	Returns: None 
+	"""
 	config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
-        v1 = client.CoreV1Api()
         k8s_client = client.ApiClient()
         k8s_api = client.ExtensionsV1beta1Api(k8s_client)
         configuration = kubernetes.client.Configuration()
-        api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
 	deps = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace =str(request.name))
 	while(deps.status.available_replicas != 1):
             k8s_api = client.ExtensionsV1beta1Api(k8s_client)
@@ -238,9 +242,10 @@ class HandleHeadNodes(VC3Task):
         return login_info(self, request)
     
     def add_keys_to_pod(self, request):
-	'''
-	returns string to append to config map that adds users
-	'''
+	"""Returns string to append to config map that adds users
+	Args: request
+	Returns: None
+	"""
         members    = self.get_members_names(request)
 	attributes = {}
 	i = 1000
