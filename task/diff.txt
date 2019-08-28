@@ -1,0 +1,579 @@
+diff --git a/./HandleHeadNodesold.py b/HandleHeadNodes.py
+index 55d54f7..2859391 100644
+--- a/./HandleHeadNodesold.py
++++ b/HandleHeadNodes.py
+@@ -1,6 +1,5 @@
+ #!/usr/bin/env python
+ 
+-
+ from vc3master.task import VC3Task
+ from vc3infoservice.infoclient import InfoConnectionFailure, InfoEntityMissingException
+ 
+@@ -10,36 +9,29 @@ import traceback
+ 
+ import json
+ import os
++import sys
+ import re
+ import subprocess
+ import time
++import pprint
++import subprocess, yaml
++
++from kubernetes import client, config, utils
++import kubernetes.client 
++from kubernetes.client.rest import ApiException
++from jinja2 import Environment, FileSystemLoader
+ 
+-from novaclient import client as novaclient
+ 
+ class HandleHeadNodes(VC3Task):
+     '''
+     Plugin to manage the head nodes lifetime.
+-     
+     '''
+ 
+     def __init__(self, parent, config, section):
+         super(HandleHeadNodes, self).__init__(parent, config, section)
+         self.client = parent.client
+-        self.config = config
+-
+-        nova_conf = {
+-                'version' : '2.0',
+-                'username' : self.config.get(section, 'username'),
+-                'password' : self.config.get(section, 'password'),
+-                'user_domain_name' : self.config.get(section, 'user_domain_name'),
+-                'project_domain_name' : self.config.get(section, 'project_domain_name'),
+-                'auth_url' : self.config.get(section, 'auth_url'),
+-                }
+-
+-        self.nova = novaclient.Client( **nova_conf );
+-
++        self.config = config 
+         self.node_prefix           = self.config.get(section, 'node_prefix')
+-
+         self.node_image            = self.config.get(section, 'node_image')
+         self.node_flavor           = self.config.get(section, 'node_flavor')
+         self.node_user             = self.config.get(section, 'node_user')
+@@ -50,17 +42,10 @@ class HandleHeadNodes(VC3Task):
+         self.node_max_no_contact_time    = int(self.config.get(section, 'node_max_no_contact_time'))
+         self.node_max_initializing_count = int(self.config.get(section, 'node_max_initializing_count'))
+ 
+-        self.ansible_path       = os.path.expanduser(self.config.get(section, 'ansible_path'))
+-        self.ansible_playbook   = self.config.get(section, 'ansible_playbook')
+-
+-        self.ansible_debug_file = os.path.expanduser(self.config.get(section, 'ansible_debug_file')) # temporary for debug, only works for one node at a time
+-        self.ansible_debug      = open(self.ansible_debug_file, 'a')
+-
+         groups = self.config.get(section, 'node_security_groups')
+         self.node_security_groups = groups.split(',')
+ 
+         self.initializers = {}
+-
+         # keep las succesful contact to node, to check against node_max_no_contact_time.
+         self.last_contact_times = {}
+ 
+@@ -69,6 +54,212 @@ class HandleHeadNodes(VC3Task):
+ 
+         self.log.debug("HandleHeadNodes VC3Task initialized.")
+ 
++    global login_info
++    def login_info(self, request):
++    	"""Finds IP and port for ssh login
++	Args: request 
++	Returns: IP and port as integers 
++	"""
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        v1 = client.CoreV1Api()
++        k8s_client = client.ApiClient()
++        k8s_api = client.ExtensionsV1beta1Api(k8s_client)
++        configuration = kubernetes.client.Configuration()
++        api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
++        try:
++            service = v1.read_namespaced_service(name = "login-node-service-" + str(request.name), namespace = str(request.name))
++            port = service.spec.ports[0].node_port
++            list_pods = v1.list_namespaced_pod(str(request.name))
++            pod = list_pods.items[0]
++            node = v1.read_node(pod.spec.node_name)
++            IP = node.status.addresses[0].address
++            self.log.info('About to return')
++            self.log.info(IP)
++            self.log.info(port)
++            return [IP, port]
++        except Exception:
++            self.log.info("Login pod does not exist")
++            return None
++
++    def template(self):
++	"""Templating for the config files
++	Args: None
++	Returns: temp_up, temp_up2, temp_up3, temp_up4, temp_up5 as rendered files
++	"""
++	config_data = yaml.load(open('/usr/lib/python2.7/site-packages/vc3master/plugins/task/vals.yaml'),Loader=yaml.FullLoader)
++	env = Environment(loader = FileSystemLoader('./templates'), trim_blocks=True, lstrip_blocks=True)
++        template = env.get_template('condor_config.local.j2')
++        temp_up = template.render(config_data)
++        config_data2 = yaml.load(open('/etc/cvmfs_vals.yaml'),Loader=yaml.FullLoader)
++        template2 = env.get_template('cvmfs_default_local.j2')
++        temp_up2 = template2.render(config_data2)
++        config_data3 = yaml.load(open('/etc/minio'),Loader=yaml.FullLoader)
++        template3 = env.get_template('minio.env')
++        temp_up3 = template3.render(config_data3)
++        config_data4 = yaml.load(open('/etc/minio'),Loader=yaml.FullLoader)
++        template4 = env.get_template('core-site.xml.j2')
++        temp_up4 = template4.render(config_data4)
++        config_data5 = yaml.load(open('/etc/spark'),Loader=yaml.FullLoader)
++        template5 = env.get_template('spark.env')
++        temp_up5 = template5.render(config_data5)
++	return temp_up, temp_up2, temp_up3, temp_up4, temp_up5
++
++    def login_create(self, request):
++	""" Creates the deployment, service, and two config maps (one for adding users, the other for adding the config files)
++	Args: request
++	Returns: None  
++	"""
++	self.log.info('Starting login_create')
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        v1 = client.CoreV1Api()
++        k8s_client = client.ApiClient()
++        k8s_api = client.ExtensionsV1beta1Api(k8s_client)
++        configuration = kubernetes.client.Configuration()
++        api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
++        self.create_namespace(request)
++	self.add_keys_to_pod(request)
++        try:
++            # checks if deployment, service, configmap already created - To do add checks for service + configmaps
++            check = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace =str(request.name))
++            self.log.info("pod already exists")
++        except Exception:
++            # rendering template and creating configmap to mount config files
++ 	    temp_up, temp_up2, temp_up3, temp_up4, temp_up5 = self.template()
++            name = 'temcon-' + str(request.name)
++            namespace = str(request.name)
++            body = kubernetes.client.V1ConfigMap()
++            body.data = {"condor_config.local":str(temp_up),"cvmfs_default_local":str(temp_up2),"minio":str(temp_up3),"core-site.xml":str(temp_up4),"spark":str(temp_up5)}
++            body.metadata = kubernetes.client.V1ObjectMeta()
++            body.metadata.name = name
++            configuration = kubernetes.client.Configuration()
++            api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration)) 
++            try:
++            	api_response = api_instance.create_namespaced_config_map(namespace, body)
++            except ApiException as e:
++            	print("Exception when calling CoreV1Api->create_namespaced_config_map: %s\n" % e)
++	    self.log.info('CREATING DEPLOYMENT')
++	    self.create_dep(request)
++	    self.create_service(request)
++	    self.create_conf_users(request)
++	return 
++	
++    def create_namespace(self, request):
++	"""Creates namespace with request name 
++	Args: request
++	Returns: None 
++	"""
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        pp = pprint.PrettyPrinter(indent =4)
++        configuration = kubernetes.client.Configuration()
++	api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
++	body = kubernetes.client.V1Namespace(api_version = 'v1', kind = 'Namespace', metadata = kubernetes.client.V1ObjectMeta(name = str(request.name))) 
++	try: 
++    	    api_response = api_instance.create_namespace(body)
++	except ApiException as e:
++    	    print("Exception when calling CoreV1Api->create_namespace: %s\n" % e)
++
++    def create_dep(self, request):
++	"""Creates deployment with request name
++	Args: request 
++	Returns: None
++	"""
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        pp = pprint.PrettyPrinter(indent =4)
++        configuration = kubernetes.client.Configuration()
++        api_instance = kubernetes.client.AppsV1Api(kubernetes.client.ApiClient(configuration))
++        core_v1_api = client.CoreV1Api()
++        namespace = 'default'
++        body = kubernetes.client.V1Deployment() 
++        body.metadata = kubernetes.client.V1ObjectMeta()
++        body.metadata.name = 'login-node-n-' + str(request.name)
++        body.metadata.labels = {'app':'login-node-n-' + str(request.name)}
++        conf_list = []
++        conf_list.append(kubernetes.client.V1VolumeMount(name = 'config-vol', mount_path = '/root/tconfig-file.conf',sub_path = 'tconfig-file.conf'))
++        conf2_list = []
++        volume0 = kubernetes.client.V1Volume(name = 'config-vol', config_map = kubernetes.client.V1ConfigMapVolumeSource(name = 'new-config-' + str(request.name), items = [kubernetes.client.V1KeyToPath(key = "tconfig-file.conf", path = "tconfig-file.conf")]))
++        volume1 = kubernetes.client.V1Volume(name = 'temcon-vol', config_map = kubernetes.client.V1ConfigMapVolumeSource(name = 'temcon-' + str(request.name), items = [kubernetes.client.V1KeyToPath(key = "condor_config.local", path = "condor_config.local")]))
++        env_list = []
++        env_list.append(kubernetes.client.V1EnvVar(name = 'PASSWDFILE', value = "root/tconfig-file.conf"))
++        vol_m_list = []
++        vol_m_list.append(kubernetes.client.V1VolumeMount(name = 'config-vol', mount_path = '/root/tconfig-file.conf',sub_path = 'tconfig-file.conf'))
++        vol_m_list.append(kubernetes.client.V1VolumeMount(name = 'temcon-vol', mount_path = '/etc/condor/config.d/condor_config.local', sub_path = 'condor_config.local'))
++        container0 = kubernetes.client.V1Container(name = 'new-container', env = env_list, image = 'nlingareddy/condor-login', volume_mounts = vol_m_list)
++        vol_list = []
++        vol_list.append(volume0)
++        vol_list.append(volume1)
++        cont_list = []
++        cont_list.append(container0)
++        body.spec = kubernetes.client.V1DeploymentSpec(replicas= 1, selector= kubernetes.client.V1LabelSelector(match_labels= {'app':'login-node-n-' + str(request.name)}) , template= kubernetes.client.V1PodTemplateSpec(metadata = kubernetes.client.V1ObjectMeta(labels = {'app':'login-node-n-' + str(request.name)}), spec = kubernetes.client.V1PodSpec(volumes= vol_list, containers = cont_list)))
++ 	try:
++            api_response = api_instance.create_namespaced_deployment(namespace=str(request.name), body=body)
++        except ApiException as e:
++            print("Exception when calling AppsV1Api->create_namespaced_deployment: %s\n" % e)
++
++    def create_service(self, request):
++	"""Creates service with request name
++	Args: request 
++	Returns: None
++	"""
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        core_v1_api = kubernetes.client.CoreV1Api()
++        serv_list = []
++        serv_list.append(kubernetes.client.V1ServicePort(port=22, protocol='TCP'))
++        body = kubernetes.client.V1Service(metadata= kubernetes.client.V1ObjectMeta(name = 'login-node-service-' + str(request.name)), spec = kubernetes.client.V1ServiceSpec(type='NodePort', selector={'app':'login-node-n-' + str(request.name)}, ports=serv_list))
++        try:
++            api_response = core_v1_api.create_namespaced_service(namespace=str(request.name), body=body)
++        except ApiException as e:
++            print("Exception when calling AppsV1Api->create_namespaced_service: %s\n" % e)	 
++
++    def create_conf_users(self, request):
++	"""Creates config map for users with request name
++	Args: request 
++	Returns: None
++	"""
++        config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        core_v1_api = kubernetes.client.CoreV1Api()
++	string_to_append = self.add_keys_to_pod(request)
++        bodyc = kubernetes.client.V1ConfigMap(api_version = 'v1', kind = 'ConfigMap', metadata = kubernetes.client.V1ObjectMeta(name = "new-config-" + str(request.name), namespace = str(request.name)), data = {'tconfig-file.conf':'\n' +string_to_append})
++        try:
++            api_response = core_v1_api.create_namespaced_config_map(namespace=str(request.name), body = bodyc)
++        except ApiException as e:
++            print("Exception when calling CoreV1Api->create_namespaced_config_map: %s\n" % e)
++
++    def login_pending(self, request): 
++	"""Waits until pod finishes building 
++	Args: request 
++	Returns: None 
++	"""
++	config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++        k8s_client = client.ApiClient()
++        k8s_api = client.ExtensionsV1beta1Api(k8s_client)
++        configuration = kubernetes.client.Configuration()
++	deps = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace =str(request.name))
++	while(deps.status.available_replicas != 1):
++            k8s_api = client.ExtensionsV1beta1Api(k8s_client)
++            deps = k8s_api.read_namespaced_deployment_status(name= "login-node-n-" + str(request.name), namespace =str(request.name))
++        self.log.info("LOGIN POD CREATED")
++        deps.metadata.name = deps.metadata.name + "-" + request.name
++        return login_info(self, request)
++    
++    def add_keys_to_pod(self, request):
++	"""Returns string to append to config map that adds users
++	Args: request
++	Returns: None
++	"""
++        members    = self.get_members_names(request)
++	attributes = {}
++	i = 1000
++        for member in members:
++            try:
++                user = self.client.getUser(member)
++            except Exception, e:
++                self.log.warning("Could not find user: %s", member)
++                raise e
++	    string_to_append = str(user.name) +':x:' + str(i) + ':' + str(i) + ':'+ '/home/' + str(user.name) + '::' + '/bin/bash:' + str(user.sshpubstring) + '\n' + '\n'
++            self.log.info(string_to_append)
++	    i = i + 1
++	return string_to_append
++
+     def runtask(self):
+         self.log.info("Running task %s" % self.section)
+         self.log.debug("Polling master....")
+@@ -121,6 +312,7 @@ class HandleHeadNodes(VC3Task):
+             next_state, reason = headnode.state, headnode.state_reason
+ 
+             if request.state == 'cleanup' or request.state == 'terminated':
++		self.log.info("Calling state_terminating")
+                 (next_state, reason) = self.state_terminating(request, headnode)
+ 
+             if next_state == 'new':
+@@ -129,8 +321,8 @@ class HandleHeadNodes(VC3Task):
+             if next_state == 'booting': 
+                 (next_state, reason) = self.state_booting(request, headnode)
+ 
+-            if next_state == 'initializing':
+-                (next_state, reason) = self.state_initializing(request, headnode)
++            if next_state == 'pending':
++                (next_state, reason) = self.state_pending(request, headnode)
+ 
+             if next_state == 'running':
+                 (next_state, reason) = self.state_running(request, headnode)
+@@ -161,37 +353,26 @@ class HandleHeadNodes(VC3Task):
+ 
+     def state_terminating(self, request, headnode):
+         try:
+-            if headnode.state != 'terminated':
+-                if self.initializers.get(request.name, None):
+-                    try:
+-                        proc = self.initializers[request.name]
+-                        proc.terminate()
+-                    except Exception, e:
+-                        self.log.warning('Exception while killing initializer for %s: %s', request.name, e)
+-
+-                server = self.nova.servers.find(name=self.vm_name(request))
+-                self.log.debug('Teminating headnode %s for request %s', request.headnode, request.name)
+-                server.delete()
+-
+-                self.initializers.pop(request.name, None)
+-                self.last_contact_times.pop(request.name, None)
+-                self.initializing_count.pop(request.name, None)
++            config.load_kube_config(config_file = '/etc/kubernetes/admin.conf')
++	    configuration = kubernetes.client.Configuration()
++	    api_instance = kubernetes.client.CoreV1Api(kubernetes.client.ApiClient(configuration))
++    	    api_response = api_instance.delete_namespace(str(request.name))
++            self.initializers.pop(request.name, None)
+         except Exception, e:
+-            self.log.warning('Could not find headnode instance for request %s (%s)', request.name, e)
++            self.log.warning('Could not delete headnode instance for request %s (%s)', request.name, e)
+         finally:
+             return ('terminated', 'Headnode succesfully terminated')
+ 
+     def state_new(self, request, headnode):
+         self.log.info('Creating new nodeset %s for request %s', request.headnode, request.name)
+-
+         try:
+-            server = self.boot_server(request, headnode)
+-
+-            if not server:
++            login = self.boot_pod(request, headnode)
++            if not login:
+                 self.log.warning('Could not boot headnode for request %s', request.name)
+                 return ('failure', 'Could not boot headnode.', request.name)
+             else:
+                 self.log.debug('Waiting for headnode for request %s to come online', request.name)
++		self.log.info("BOOTING")
+                 return ('booting', 'Headnode is booting up.')
+         except Exception, e:
+             self.log.warning('Error in request to openstack: %s', e)
+@@ -202,60 +383,40 @@ class HandleHeadNodes(VC3Task):
+             headnode.app_host = self.__get_ip(request)
+             if headnode.app_host:
+                 self.last_contact_times[request.name] = time.time()
++	    headnode.port = self.__get_port( request)
++            return ('pending', 'Headnode is being configured.')
+ 
+-        if self.check_if_online(request, headnode):
+-            return ('initializing', 'Headnode is being configured.')
+-        else: 
+-            self.log.debug('Headnode for %s could not yet be used for login.', request.name)
+-            return ('booting', 'Headnode is booting up.')
+-
+-
+-    def state_initializing(self, request, headnode):
+-        self.initialize_server(request, headnode)
+-
+-        (next_state, state_reason) = self.check_if_done_init(request, headnode)
+-
+-        if self.check_if_online(request, headnode):
+-            self.last_contact_times[request.name] = time.time()
++    def state_pending(self, request, headnode):
++	self.login_pending(request)
++        (next_state, state_reason) = ('running', 'Headnode is ready to be used.') 
+ 
+         if next_state == 'running':
+-            self.log.info('Done initializing server %s for request %s', request.headnode, request.name)
+-            self.report_running_server(request, headnode)
++            self.log.info('Done initializing pod %s for request %s', request.headnode, request.name)
++            #self.report_running_server(request, headnode)
+         elif next_state != 'failure':
+             self.log.debug('Waiting for headnode for %s to finish initialization.', request.name)
+         return (next_state, state_reason)
+ 
+-
+     def state_running(self, request, headnode):
+-        if self.check_if_online(request, headnode):
+-            self.last_contact_times[request.name] = time.time()
+-
+         return ('running', 'Headnode is ready to be used.')
+ 
+-
+     def check_if_online(self, request, headnode):
+         if headnode.app_host is None:
+             self.log.debug('Headnode for %s does not have an address yet.', request.name)
+             return False
+ 
+         try:
++	    self.log.info('The port is')
++	    self.log.info(headnode.port)
+             self.log.debug("Connecting to headnode %s with key %s as user %s", headnode.app_host, self.node_private_key_file, self.node_user )
+             subprocess.check_call([
+                 'ssh',
+-                '-o',
+-                'UserKnownHostsFile=/dev/null',
+-                '-o',
+-                'StrictHostKeyChecking=no',
+-                '-o',
+-
+-                'ConnectTimeout=10',
+                 '-i',
+                 self.node_private_key_file,
+-                '-l',
+-                self.node_user,
+-                headnode.app_host,
+-                '--',
+-                '/bin/date'])
++		'-p',
++                str(headnode.port),
++                self.node_user +'@'
++                + headnode.app_host], shell=True)
+ 
+             self.log.info('Headnode for %s running at %s', request.name, headnode.app_host)
+ 
+@@ -287,97 +448,28 @@ class HandleHeadNodes(VC3Task):
+         else:
+             return (next_state, reason)
+ 
+-    def boot_server(self, request, headnode):
++    def boot_pod(self, request, headnode):
++	self.log.info('Starting boot')
+         try:
+-            server = self.nova.servers.find(name = self.vm_name(request))
+-            self.log.info('Found headnode at %s for request %s', request.headnode, request.name)
+-            return server
++            login = login_info(self,request)
++	    if login:
++            	self.log.info('Found headnode at %s for request %s', request.headnode, request.name)
++            	return login
+         except Exception, e:
+             pass
+ 
+         self.log.info('Booting new headnode for request %s...', request.name)
+-        server = self.nova.servers.create(name = self.vm_name(request), image = self.node_image, flavor = self.node_flavor, key_name = self.node_public_key_name, security_groups = self.node_security_groups, nics = [{'net-id' : self.node_network_id}])
+-
+-        return server
+-
+-
+-    def initialize_server(self, request, headnode):
+-
+-        # if we already initialized this headnode
+-        if self.initializers.has_key(request.name):
+-            return
+-
+-        self.initializing_count[request.name] = self.initializing_count.get(request.name, 0) + 1
+-
+-        self.log.info("Trying to initialize headnode for request %s for the %d/%d time." % (request.name, self.initializing_count[request.name], self.node_max_initializing_count))
+-
+-        os.environ['ANSIBLE_HOST_KEY_CHECKING']='False'
+-
+-        extra_vars  = {}
+-        extra_vars['request_name']       = request.name
+-        extra_vars['request_owner']      = request.owner
+-        extra_vars['headnode_ip']        = headnode.app_host
+-        extra_vars['setup_user_name']    = self.node_user
+-        extra_vars['production_keys']    = self.get_members_keys(request)
+-        extra_vars['builder_options']    = self.get_builder_options(request)
+-        extra_vars['shared_secret_file'] = self.secret_auth_filename(request)
+-        extra_vars['globusvc3_mapfile']  = self.get_globusvc3_mapfile(request)
+-
+-        app_type = headnode.app_type
+-        if app_type is not None:
+-            playbook_name = "login-" + app_type + ".yaml"
+-            self.ansible_playbook = os.path.join(self.ansible_path, playbook_name)
+-
+-        self.log.debug("playbook path : %s", self.ansible_playbook)
+-
+-        # passing extra-vars as a command line argument for now. That won't
+-        # scale well, we want to write those vars to a file instead.
+-        pipe = subprocess.Popen(
+-                ['ansible-playbook',
+-                    self.ansible_playbook,
+-                    '--extra-vars',
+-                    json.dumps(extra_vars),
+-                    '--key-file',
+-                    self.node_private_key_file,
+-                    '--inventory',
+-                    headnode.app_host + ',',
+-                    ],
+-                cwd = self.ansible_path,
+-                stdout=self.ansible_debug,
+-                stderr=self.ansible_debug,
+-                )
+-        self.initializers[request.name] = pipe
+-        self.last_contact_times[request.name] = time.time()
+-
+-    def check_if_done_init(self, request, headnode):
+-        try:
+-            pipe = self.initializers[request.name]
+-            pipe.poll()
+-
+-            self.ansible_debug.flush()
+-
+-            if pipe.returncode is None:
+-                return ('initializing', 'Headnode is being configured.')
+-
+-            # the process is done when there is a returncode
+-            self.initializers.pop(request.name, None)
++        login = self.login_create(request)
++	self.log.info('past login create')
++	if login == None:
++		self.log.info('login is null')
++	self.log.info('returning from boot server')
++        return login
+ 
+-            if pipe.returncode != 0:
+-                self.log.warning('Error when initializing headnode for request %s. Exit status: %d', request.name, pipe.returncode)
+-                
+-                if self.initializing_count[request.name] >= self.node_max_initializing_count:
+-                    self.log.warning("Could not initialize headnode after %d tries." % (self.node_max_initializing_count,))
+-                    return ('failure', 'Headnode could not be configured.')
+-                else:
+-                    # Make another go at initializing...
+-                    return ('initializing', 'Headnode is being configured.')
+ 
++    def check_if_done(self, request, headnode):
+             return ('running', 'Headnode is ready to be used.')
+ 
+-        except Exception, e:
+-            self.log.warning('Error for headnode initializers for request %s (%s)', request.name, e)
+-            return ('failure', 'Headnode could not be configured.')
+-
+     def report_running_server(self, request, headnode):
+         try:
+             headnode.app_sectoken = self.read_encoded(self.secret_auth_filename(request))
+@@ -485,28 +577,19 @@ class HandleHeadNodes(VC3Task):
+         return app_type
+ 
+     def __get_ip(self, request):
+-        try:
+-            server = self.nova.servers.find(name=self.vm_name(request))
+-
+-            if server.status != 'ACTIVE':
++        login = login_info(self,request)
++        if login[0] == None:
+                 self.log.debug("Headnode for request %s is not active yet.", request.name)
+                 return None
+-
+-        except Exception, e:
+-            self.log.warning('Could not find headnode for request %s (%s)', request.name, e)
+-            return None
+-
+-        try:
+-            for network in server.networks.keys():
+-                for ip in server.networks[network]:
+-                    if re.match('\d+\.\d+\.\d+\.\d+', ip):
+-                        return ip
+-        except Exception, e:
+-            self.log.warning("Could not find ip for request %s: %s", request.name, e)
+-            raise e
+-
+-        return None
+-
++	else:
++                return login[0]
++    def __get_port(self, request):
++        login = login_info(self, request)
++        if login[1] == None:
++                self.log.debug("Headnode for request %s is not active yet.", request.name)
++                return None
++        else:
++                return login[1]
+     def vm_name(self, request):
+         return self.node_prefix + request.name
+ 
